@@ -1,0 +1,13 @@
+# Compiled binary
+bin/
+
+# Object files
+*.o
+*.out
+*.a
+
+# Compiler-generated dependency files
+*.d
+
+# VS Code settings (your personal editor config, not part of the project)
+.vscode/
