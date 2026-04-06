@@ -4,17 +4,71 @@
 #include <netdb.h>
 #include <unistd.h>
 #include <string>
+#include <cstring>
+#include <cerrno>
+
+#include <signal.h> // catching termination signal
+#include <atomic>
+
+std::atomic<bool> keep_running(true);
 
 constexpr int PORT = 8080;
 constexpr int BUFFER_SIZE = 1024;
 
-int main(int argc, char* argv[]) {
+//handle signal
+void handle_sigint(int) {keep_running = false;}
+
+int main() {
+
+    /*
+        The sigaction() system call is used to change the action taken by a process on receipt of a specific signal.
+        The sigaction structure is defined as something like:
+
+            struct sigaction {
+                void     (*sa_handler)(int);
+                void     (*sa_sigaction)(int, siginfo_t *, void *);
+                sigset_t   sa_mask;
+                int        sa_flags;
+                void     (*sa_restorer)(void);
+            };
+        
+    */
+
+    struct sigaction sa; // sigaction is a struct that describes how to handle a signal.
+    sa.sa_handler = handle_sigint; // tells which function to call
+    /*The sigemptyset() function initializes the signal set pointed to
+       by set, such that all signals defined in POSIX.1‐2008 are
+       excluded.
+       
+       What sa_mask controls is something different — it's about what happens during the 2-3 microseconds your handler function is actually executing. 
+       Should other signals be blocked in that tiny window? 
+       For our simple handler that just sets a bool, it doesn't matter — it's so fast nothing can interfere. 
+       So we set it to empty. 
+       Before sigemptyset():
+        sigset_t = [???? ???? ???? ????]  (garbage/unknown) - the bits represents signal like SIGINT, SIGTERM, etc
+
+        After sigemptyset():
+        sigset_t = [0000 0000 0000 0000]  (all zeros = empty)*/
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0; /*Extra options for behavior. 
+    Some useful flags exist like SA_RESTART which automatically restarts interrupted system calls. 
+    Setting it to 0 means default behavior — no extras. 
+    We explicitly want interrupted system calls to return EINTR so our loop can detect the signal, so 0 is correct here.*/
+
+    /*sigaction(SIGINT, &sa, nullptr);
+    This is the actual system call that registers everything with the kernel. You're saying:
+        SIGINT — handle this specific signal
+        &sa — using these instructions
+        nullptr — we don't care about saving the old handler 
+        (you can pass a pointer here if you want to restore the previous behavior later)*/
+    sigaction(SIGINT, &sa, nullptr);
+
     // create a socket
     // int socket(int domain, int type, int protocol);
     // AF_INET = IPv4, SOCK_STREAM = TCP (as opposed to UDP which is SOCK_DGRAM)
     int server_sfd = socket(AF_INET, SOCK_STREAM, 0);
     if(server_sfd == -1) {
-        std::cerr << "Socket Failed" << std::endl;
+        perror("socket() failed");
         return 1;
     }
     std::cout << "Socket created with file descripter: " << server_sfd << std::endl;
@@ -101,7 +155,7 @@ int main(int argc, char* argv[]) {
     sizeof(addr) = tells kernel how much data to read (16 bytes for IPv4)
     */
     if(bind(server_sfd, (struct sockaddr*)&socket_addr, socketaddr_len) == -1) {
-        std::cerr << "Bind Faliure\n";
+        perror("bind() failed");
         return 1;
     }
     std::cout << "Socket binding successful" << std::endl;
@@ -133,87 +187,106 @@ int main(int argc, char* argv[]) {
 
     Must call after bind() and before accept()
     */
-
+    // tell the os only once to start listening 
     if(listen(server_sfd, 3) == -1) {
-        std::cerr << "Listen error\n";
+        perror("listen() failed");
         return 1;
     }
     std::cout << "Server listening on port " << PORT << std::endl;
-
-    // accept connection
-    /*
-    The  accept()  system  call  is used with connection-based socket types
-       (SOCK_STREAM, SOCK_SEQPACKET).  It extracts the  first  connection  re‐
-       quest  on  the  queue  of pending connections for the listening socket,
-       sockfd, creates a new connected socket, and returns a new file descrip‐
-       tor referring to that socket.  The newly created socket is not  in  the
-       listening  state.   The  original  socket  sockfd is unaffected by this
-       call.
-
-    int accept(int sockfd, struct sockaddr *_Nullable restrict addr,
-                  socklen_t *_Nullable restrict addrlen);
-
-
-    What it does:
+    // create a buffer to store incomming data
+    while(keep_running) { // keep the server running
+        // accept connection
+        /*
+        The  accept()  system  call  is used with connection-based socket types
+        (SOCK_STREAM, SOCK_SEQPACKET).  It extracts the  first  connection  re‐
+        quest  on  the  queue  of pending connections for the listening socket,
+        sockfd, creates a new connected socket, and returns a new file descrip‐
+        tor referring to that socket.  The newly created socket is not  in  the
+        listening  state.   The  original  socket  sockfd is unaffected by this
+        call.
+        
+        int accept(int sockfd, struct sockaddr *_Nullable restrict addr,
+        socklen_t *_Nullable restrict addrlen);
+        
+        
+        What it does:
         Takes the first pending connection from the queue
         Creates a brand new socket for that specific client
         Returns a new file descriptor for communication with that client
         Leaves the original socket untouched (still listening for more)
-
-    Parameters:
+        
+        Parameters:
         sockfd - The listening socket (the one you called listen() on)
         addr - Pointer to store client's address (can be NULL if you don't care)
-    */
-
-    int new_socket = accept(server_sfd, (struct sockaddr*)&socket_addr, &socketaddr_len);
-    if(new_socket == -1) {
-        std::cerr << "Accepting connection failed.\n";
+        */
+       
+       int new_socket = accept(server_sfd, (struct sockaddr*)&socket_addr, &socketaddr_len);
+       if (new_socket == -1) {
+           if (errno == EINTR) { // EINTR  The system call was interrupted by a signal that was caught
+            // before a valid connection arrived;
+            // interrupted by signal, not a real error
+            break;
+        }
+        perror("accept() failed");
         return 1;
     }
     // echo the message recieved from client
     /*
     #include <unistd.h> // for ssize_t
-
+    
     ssize_t read(int fd, void buf[.count], size_t count);
-
+    
     read() returns the number of bytes read. -1 on error and 0 if connection closed by client
     */
+   
+   char buffer[BUFFER_SIZE];
+   memset(buffer, 0, BUFFER_SIZE); // set buffer to 0 to accept new data
+   ssize_t valread = read(new_socket, buffer, BUFFER_SIZE);
+   
+   if(valread == -1) {
+       perror("read() failed");
+            close(new_socket);
+            continue;
+        } else if (valread == 0) {
+            std::cout << "Connection closed with client!\n";
+        } else {
+            std::cout << "Recieved: " << buffer << std::endl;
+    
+            // sending back messag recieved
+            /*
+            #include <sys/socket.h>
+    
+            ssize_t send(int sockfd, const void buf[.len], size_t len, int flags);
+            ssize_t sendto(int sockfd, const void buf[.len], size_t len, int flags,
+                            const struct sockaddr *dest_addr, socklen_t addrlen);
+            ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags);
+    
+            send() - Use when: Socket is already connect()-ed 
+            Sends data to the pre-connected peer (no address needed)
+    
+            sendto() - Use when: Socket is not connected, or you want to send to different addresses
+            Where it sends: To the specific dest_addr you provide
+    
+            sendmsg() - Most flexible
+            ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags);
+            Use when: Need advanced features (multiple buffers, file descriptors, complex addressing)
+    
+            flags parameter (common values)
+                0 - Normal operation
+                MSG_DONTWAIT - Non-blocking send
+                MSG_NOSIGNAL - Don't send SIGPIPE on broken connection
+    
+            */
+    
+            send(new_socket, buffer, valread, 0);
+            std::cout << "Sending back: " << buffer << std::endl;
+        }
 
-    char buffer[BUFFER_SIZE] = {0};
-    ssize_t valread = read(new_socket, buffer, BUFFER_SIZE);
-    std::cout << "Recieved: " << buffer << std::endl;
-
-    // sending back messag recieved
-    /*
-    #include <sys/socket.h>
-
-       ssize_t send(int sockfd, const void buf[.len], size_t len, int flags);
-       ssize_t sendto(int sockfd, const void buf[.len], size_t len, int flags,
-                      const struct sockaddr *dest_addr, socklen_t addrlen);
-       ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags);
-
-    send() - Use when: Socket is already connect()-ed 
-    Sends data to the pre-connected peer (no address needed)
-
-    sendto() - Use when: Socket is not connected, or you want to send to different addresses
-    Where it sends: To the specific dest_addr you provide
-
-    sendmsg() - Most flexible
-    ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags);
-    Use when: Need advanced features (multiple buffers, file descriptors, complex addressing)
-
-    flags parameter (common values)
-        0 - Normal operation
-        MSG_DONTWAIT - Non-blocking send
-        MSG_NOSIGNAL - Don't send SIGPIPE on broken connection
-
-    */
-
-    ssize_t valsent = send(new_socket, buffer, valread, 0);
-    std::cout << "Message echoed back successfully.\n";
-
-    // close sockets
-    close(new_socket);
-    close(server_sfd);
+        // close client socket
+        close(new_socket);
+    }
+    std::cout << "\nShutting down server...\n";
+    close(server_sfd); // close listening socket
+    std::cout << "Server shut down cleanly.\n";
     return 0;
 }
