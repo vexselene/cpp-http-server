@@ -6,6 +6,7 @@
 #include <string>
 #include <cstring>
 #include <cerrno>
+#include <thread>
 
 #include <signal.h> // catching termination signal
 #include <atomic>
@@ -17,6 +18,61 @@ constexpr int BUFFER_SIZE = 1024;
 
 //handle signal
 void handle_sigint(int) {keep_running = false;}
+
+void handle_client(int client_fd) {
+    // echo the message recieved from client
+    /*
+    #include <unistd.h> // for ssize_t
+    
+    ssize_t read(int fd, void buf[.count], size_t count);
+    
+    read() returns the number of bytes read. -1 on error and 0 if connection closed by client
+    */
+   
+    char buffer[BUFFER_SIZE];
+    memset(buffer, 0, BUFFER_SIZE); // set buffer to 0 to accept new data
+    ssize_t valread = read(client_fd, buffer, BUFFER_SIZE);
+
+    if(valread == -1) {
+       perror("read() failed");
+    } else if (valread == 0) {
+        std::cout << "Connection closed with client!\n";
+    } else {
+        std::cout << "Recieved: " << buffer << std::endl;
+
+        // sending back messag recieved
+        /*
+        #include <sys/socket.h>
+
+        ssize_t send(int sockfd, const void buf[.len], size_t len, int flags);
+        ssize_t sendto(int sockfd, const void buf[.len], size_t len, int flags,
+                        const struct sockaddr *dest_addr, socklen_t addrlen);
+        ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags);
+
+        send() - Use when: Socket is already connect()-ed 
+        Sends data to the pre-connected peer (no address needed)
+
+        sendto() - Use when: Socket is not connected, or you want to send to different addresses
+        Where it sends: To the specific dest_addr you provide
+
+        sendmsg() - Most flexible
+        ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags);
+        Use when: Need advanced features (multiple buffers, file descriptors, complex addressing)
+
+        flags parameter (common values)
+            0 - Normal operation
+            MSG_DONTWAIT - Non-blocking send
+            MSG_NOSIGNAL - Don't send SIGPIPE on broken connection
+
+        */
+
+        send(client_fd, buffer, valread, 0);
+        std::cout << "Sending back: " << buffer << std::endl;
+    }
+
+    // close client socket
+    close(client_fd);    
+}
 
 int main() {
 
@@ -193,7 +249,7 @@ int main() {
         return 1;
     }
     std::cout << "Server listening on port " << PORT << std::endl;
-    // create a buffer to store incomming data
+    
     while(keep_running) { // keep the server running
         // accept connection
         /*
@@ -220,70 +276,20 @@ int main() {
         addr - Pointer to store client's address (can be NULL if you don't care)
         */
        
-       int new_socket = accept(server_sfd, (struct sockaddr*)&socket_addr, &socketaddr_len);
-       if (new_socket == -1) {
-           if (errno == EINTR) { // EINTR  The system call was interrupted by a signal that was caught
-            // before a valid connection arrived;
-            // interrupted by signal, not a real error
-            break;
+        int new_socket = accept(server_sfd, (struct sockaddr*)&socket_addr, &socketaddr_len);
+        if (new_socket == -1) {
+            if (errno == EINTR) { // EINTR  The system call was interrupted by a signal that was caught
+                // before a valid connection arrived;
+                // interrupted by signal, not a real error
+                break;
+            }
+            perror("accept() failed");
+            return 1;
         }
-        perror("accept() failed");
-        return 1;
-    }
-    // echo the message recieved from client
-    /*
-    #include <unistd.h> // for ssize_t
-    
-    ssize_t read(int fd, void buf[.count], size_t count);
-    
-    read() returns the number of bytes read. -1 on error and 0 if connection closed by client
-    */
-   
-   char buffer[BUFFER_SIZE];
-   memset(buffer, 0, BUFFER_SIZE); // set buffer to 0 to accept new data
-   ssize_t valread = read(new_socket, buffer, BUFFER_SIZE);
-   
-   if(valread == -1) {
-       perror("read() failed");
-            close(new_socket);
-            continue;
-        } else if (valread == 0) {
-            std::cout << "Connection closed with client!\n";
-        } else {
-            std::cout << "Recieved: " << buffer << std::endl;
-    
-            // sending back messag recieved
-            /*
-            #include <sys/socket.h>
-    
-            ssize_t send(int sockfd, const void buf[.len], size_t len, int flags);
-            ssize_t sendto(int sockfd, const void buf[.len], size_t len, int flags,
-                            const struct sockaddr *dest_addr, socklen_t addrlen);
-            ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags);
-    
-            send() - Use when: Socket is already connect()-ed 
-            Sends data to the pre-connected peer (no address needed)
-    
-            sendto() - Use when: Socket is not connected, or you want to send to different addresses
-            Where it sends: To the specific dest_addr you provide
-    
-            sendmsg() - Most flexible
-            ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags);
-            Use when: Need advanced features (multiple buffers, file descriptors, complex addressing)
-    
-            flags parameter (common values)
-                0 - Normal operation
-                MSG_DONTWAIT - Non-blocking send
-                MSG_NOSIGNAL - Don't send SIGPIPE on broken connection
-    
-            */
-    
-            send(new_socket, buffer, valread, 0);
-            std::cout << "Sending back: " << buffer << std::endl;
-        }
-
-        // close client socket
-        close(new_socket);
+        
+        // spawn a thread to handle client
+        std::thread t(handle_client, new_socket);
+        t.detach(); // detach immediately so that main goes back to accepting.
     }
     std::cout << "\nShutting down server...\n";
     close(server_sfd); // close listening socket
