@@ -10,7 +10,7 @@ Basic HTTP server in C++ using thread pool to handle multiple clients.
 
 ## Build
 mkdir -p bin
-g++ -Wall -Wextra -g src/*.cpp -I include -o bin/server -pthread
+g++ -std=c++20 -Wall -Wextra -g src/*.cpp -I include -o bin/server -pthread
 
 ## Run
 ./bin/server
