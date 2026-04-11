@@ -2,6 +2,7 @@
 #include <iostream>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <netdb.h>
 #include <unistd.h>
 #include <string>
@@ -85,6 +86,13 @@ int main() {
             return 1;
         }
         
+        // set 5 second timeout on the clients
+        struct timeval timeout;
+        timeout.tv_sec = 5;  // sec
+        timeout.tv_usec = 0; // microsec
+
+        setsockopt(new_socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
         pool.enqueue(new_socket);
     }
     std::cout << "\nShutting down server...\n";

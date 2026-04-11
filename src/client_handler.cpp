@@ -10,6 +10,16 @@
 
 constexpr int BUFFER_SIZE = 1024;
 
+ssize_t send_all(int sock, const char* data, size_t length) {
+    size_t total = 0;
+
+    while (total < length) {
+        ssize_t sent = send(sock, data + total, length - total, 0);
+        if (sent <= 0) return sent;
+        total += sent;
+    } return total;
+}
+
 // determine content type from file extension
 std::string get_content_type(const std::string& path) {
     if (path.ends_with(".html")) return "text/html";
@@ -36,7 +46,7 @@ void respond(int client_fd, int status, const std::string& body, const std::stri
         "Connection: close\r\n"
         "\r\n" + body;
 
-    ssize_t sent = send(client_fd, response.c_str(), response.size(), 0);
+    ssize_t sent = send_all(client_fd, response.c_str(), response.size());
     if (sent == -1) perror("send() failed");
 }
 
@@ -56,7 +66,10 @@ void handle_client(int client_fd) {
     }
     
     if(valread < 0) {
-        perror("read() failed");
+        // check if valread == -1 is error or timeout
+        if(errno == EAGAIN || errno == EWOULDBLOCK) { 
+            std::cout << "Client timed out!\n";
+        } else {perror("read() failed");}
         close(client_fd);
         return;
     }
@@ -65,6 +78,7 @@ void handle_client(int client_fd) {
         close(client_fd);
         return;
     }
+    
     // parse request
     std::string method;
     std::string path;
@@ -79,13 +93,6 @@ void handle_client(int client_fd) {
     // validation 
     if (method.empty() || path.empty() || version.empty()) {
         respond(client_fd, 400, "");
-        close(client_fd);
-        return;
-    }
-
-    // handle annoying browser request
-    if (path == "/favicon.ico") {
-        respond(client_fd, 404, "");
         close(client_fd);
         return;
     }
@@ -105,6 +112,20 @@ void handle_client(int client_fd) {
 
         headers[key] = value;
     }
+
+    // handle annoying browser request
+    if (path == "/favicon.ico") {
+        respond(client_fd, 404, "");
+        close(client_fd);
+        return;
+    }
+
+    // block path traversal attacks
+    if (path.find("..") != std::string::npos) {
+        respond(client_fd, 400, "<html><body><h1>400 Bad Request</h1></body></html>");
+        close(client_fd);
+        return;
+    }
     
     std::cout << "Method: " << method << "\n";
     std::cout << "Path: " << path << "\n";
@@ -123,17 +144,17 @@ void handle_client(int client_fd) {
     if (path == "/") file_path = web_root + "/index.html";
 
     // read file
-    std::ifstream file(file_path);
+    std::ifstream file(file_path, std::ios::binary);
     if (!file.is_open()) {
         respond(client_fd, 404, "<html><body><h1>404 Not Found</h1></body></html>");
         close(client_fd);
         return;
     }
 
-    std::string body(
-        (std::istreambuf_iterator<char>(file)),
-        (std::istreambuf_iterator<char>())
-    );
+    std::ostringstream ss;
+    ss << file.rdbuf();
+
+    std::string body = ss.str();
 
     respond(client_fd, 200, body, get_content_type(file_path));
 
