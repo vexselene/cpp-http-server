@@ -1,5 +1,4 @@
 #include "../include/thread_pool.h"
-#include "../include/client_handler.h"
 #include <iostream>
 
 ThreadPool::ThreadPool(int num_threads) {
@@ -23,10 +22,10 @@ ThreadPool::~ThreadPool() {
     }
 }
 
-void ThreadPool::enqueue(int client_fd) {
+void ThreadPool::enqueue(std::function<void()> task) {
     {
         std::lock_guard<std::mutex> lock(queue_mutex);
-        client_queue.push(client_fd);
+        task_queue.push(task);
     } // automatically unlocked here
 
     cv.notify_one(); // wake one worker thread
@@ -38,17 +37,16 @@ void ThreadPool::worker_loop() {
         std::unique_lock<std::mutex> lock(queue_mutex);
 
         // Wait until either: queue has work, OR server is shutting down
-        cv.wait(lock, [this]{return !client_queue.empty() || !keep_running;});
+        cv.wait(lock, [this]{return !task_queue.empty() || !keep_running;});
     
         // If shutting down and queue is empty, exit this worker
-        if(!keep_running && client_queue.empty()) return;
+        if(!keep_running && task_queue.empty()) return;
 
         // Take work from queue
-        int client_fd = client_queue.front();
-        client_queue.pop();
-
+        auto task = task_queue.front();
+        task_queue.pop();
         // Unlock before handling so other workers can grab work from queue simultaneously
         lock.unlock();
-        handle_client(client_fd);
+        task(); // just call it, no handle_client directly
     }
 }

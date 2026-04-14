@@ -10,7 +10,7 @@ struct Request {
     std::string version;
 };
 
-void handle_client(int client_fd);
+void handle_client(int client_fd, const std::string& web_root);
 void parse_headers(std::unordered_map<std::string, std::string>& headers, 
                     std::istringstream& stream, std::string& line);
 Request parse_request(std::istringstream& stream, std::string& line);

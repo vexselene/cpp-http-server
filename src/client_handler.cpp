@@ -167,7 +167,7 @@ void route_request(int client_fd, const Request& rq, const std::string& web_root
     serve_file(client_fd, web_root, rq.path);
 }
 
-void handle_client(int client_fd) {
+void handle_client(int client_fd, const std::string& web_root) {
     // create buffer to hold incoming data
     char buffer[BUFFER_SIZE];
     std::string request;
@@ -207,8 +207,6 @@ void handle_client(int client_fd) {
     std::cout << "Method: " << rq.method << "\n";
     std::cout << "Path: " << rq.path << "\n";
     std::cout << "Version: " << rq.version << "\n";
-
-    std::string web_root  = "./static";
 
     route_request(client_fd, rq, web_root);
 
