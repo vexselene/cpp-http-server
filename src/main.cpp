@@ -95,8 +95,10 @@ int start_server(Config& cfg) {
 
         setsockopt(new_socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
 
-        pool.enqueue([new_socket, &cfg]() {
-            handle_client(new_socket, cfg.web_root);
+        pool.register_fd(new_socket); // register new_socket
+        pool.enqueue([new_socket, &cfg, &pool]() {
+            handle_client(new_socket, cfg.web_root); // handle new_socket
+            pool.unregister_fd(new_socket); // un-register new_socket
         });
     }
     std::cout << "\nShutting down server...\n";

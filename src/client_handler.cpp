@@ -63,8 +63,9 @@ std::string get_content_type(const std::string& path) {
     if (path.ends_with(".svg")) return "image/svg+xml";
     return "application/octet-stream"; // instead of "text/plain"
 }
+void respond(int client_fd, int status, const std::string& body, bool keep_alive,
+             const std::string& content_type) {
 
-void respond(int client_fd, int status, const std::string& body, const std::string& content_type) {
     std::string status_text;
 
     if (status == 200) status_text = "200 OK";
@@ -75,12 +76,21 @@ void respond(int client_fd, int status, const std::string& body, const std::stri
 
     std::string response =
         "HTTP/1.1 " + status_text + "\r\n"
-        "Content-Type: " + content_type + "\r\n"
         "Content-Length: " + std::to_string(body.size()) + "\r\n"
-        "Connection: close\r\n"
-        "\r\n" + body;
+        "Content-Type: " + content_type + "\r\n"
+        "Connection: " + std::string(keep_alive ? "keep-alive" : "close") + "\r\n";
+    if (keep_alive) {
+        response += "Keep-Alive: timeout=5, max=100\r\n";
+    }
+    response += "\r\n" + body;
 
     ssize_t sent = send_all(client_fd, response.c_str(), response.size());
+
+    // log
+    std::cout << "[RESP] " << status 
+          << " | bytes=" << body.size()
+          << " | " << (keep_alive ? "KA" : "CLOSE") << "\n";
+
     if (sent == -1) perror("send() failed");
 }
 
@@ -111,7 +121,7 @@ std::string resolve_path(const std::string& p) {
     return path;
 }
 
-void send_error(int client_fd, int status, const std::string& web_root) {
+void send_error(int client_fd, int status, const std::string& web_root, bool keep_alive) {
     std::string path;
 
     if (status == 400) path = "/400.html";
@@ -124,91 +134,122 @@ void send_error(int client_fd, int status, const std::string& web_root) {
         body = "<h1>" + std::to_string(status) + " Error</h1>";
     }
 
-    respond(client_fd, status, body, "text/html");
+    respond(client_fd, status, body, keep_alive, "text/html");
 }
 
-// serve any file
-void serve_file(int client_fd, const std::string& web_root, const std::string& path) {
+// serve any file 
+void serve_file(int client_fd, const std::string& web_root, const std::string& path, bool keep_alive) {
     std::string resolved_path = resolve_path(path);
     std::string full_path = web_root + resolved_path;
 
     std::string body = load_file(full_path);
 
     if (body.empty()) {
-        send_error(client_fd, 404, web_root);
+        send_error(client_fd, 404, web_root, keep_alive);
         return;
     }
 
-    respond(client_fd, 200, body, get_content_type(full_path));
+    respond(client_fd, 200, body, keep_alive, get_content_type(full_path));
 }
 
 // route request 
-void route_request(int client_fd, const Request& rq, const std::string& web_root) {
+void route_request(int client_fd, const Request& rq, const std::string& web_root, bool keep_alive) {
     if (rq.method.empty() || rq.path.empty() || rq.version.empty()) {
-        send_error(client_fd, 400, web_root);
+        send_error(client_fd, 400, web_root, keep_alive);
         return;
     }
 
     if (rq.method != "GET") {
-        send_error(client_fd, 405, web_root);
+        send_error(client_fd, 405, web_root, keep_alive);
         return;
     }
 
     if (rq.path == "/favicon.ico") {
-        send_error(client_fd, 404, web_root);
+        send_error(client_fd, 404, web_root, keep_alive);
         return;
     }
 
     if (rq.path.find("..") != std::string::npos) {
-        send_error(client_fd, 400, web_root);
+        send_error(client_fd, 400, web_root, keep_alive);
         return;
     }
 
-    serve_file(client_fd, web_root, rq.path);
+    serve_file(client_fd, web_root, rq.path, keep_alive);
 }
 
 void handle_client(int client_fd, const std::string& web_root) {
-    // create buffer to hold incoming data
-    char buffer[BUFFER_SIZE];
-    std::string request;
-    ssize_t valread = -1;
+    std::cout << "[NEW CONNECTION]\n";
+    bool connection_alive = true;
+    int handled = 0;
+    const int MAX_REQ = 100;
 
-    while(true) {  // Read until "\r\n\r\n" --> marks complete request header
-        valread = read(client_fd, buffer, BUFFER_SIZE);
-        if(valread <= 0) break;
+    while (handled < MAX_REQ && connection_alive) {
+        std::string buffer;
+        while(buffer.find("\r\n\r\n") == std::string::npos) {
+            char temp_buffer[BUFFER_SIZE];
+            ssize_t valread = -1;
+            valread = recv(client_fd, temp_buffer, BUFFER_SIZE, 0);
 
-        request.append(buffer, valread);
+            if (valread == 0) {
+                // client closed connection cleanly
+                connection_alive = false;
+                break;
+            }
 
-        if(request.find("\r\n\r\n") != std::string::npos) break;
+            if (valread < 0) {
+                // give error for everything but EAGAIN EWOULDBLOCK ECONNRESET adn break regardless
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    // SO_RCVTIMEO fired
+                } else {
+                    // ECONNRESET, EBADF (from shutdown), or real error
+                    if (errno != ECONNRESET)
+                        perror("recv failed");
+                }
+                connection_alive = false;
+                break;
+            }
+            buffer.append(temp_buffer, valread);
+        }
+
+        if (buffer.empty()) break;
+
+        size_t pos = buffer.find("\r\n\r\n");
+        if (pos == std::string::npos) break;
+
+        std::string request = buffer.substr(0, pos + 4);
+
+        // remove processed part, KEEP rest
+        buffer.erase(0, pos + 4);
+        
+        std::istringstream stream(request);
+        std::string line;
+        Request rq = parse_request(stream, line);
+
+        // log 
+        std::cout << "[REQ] " << rq.method << " " << rq.path << " (" << rq.version << ")\n";
+        
+        std::unordered_map<std::string, std::string> headers;
+        parse_headers(headers, stream, line);
+
+        bool keep_alive = true;
+
+        std::cout << "[CONN] keep_alive=" << (keep_alive ? "true" : "false") << "\n";
+
+        auto it = headers.find("connection");
+        if (it != headers.end()) {
+            std::string val = it->second;
+            std::transform(val.begin(), val.end(), val.begin(), ::tolower);
+            if (val == "close") keep_alive = false;
+        } else {
+            keep_alive = (rq.version == "HTTP/1.1");
+        }
+
+        route_request(client_fd, rq, web_root, keep_alive);
+
+        handled++;
+
+        if (!keep_alive) break;
     }
-    
-    if(valread < 0) {
-        // check if valread == -1 is error or timeout
-        if(errno == EAGAIN || errno == EWOULDBLOCK) { 
-            std::cout << "Client timed out!\n";
-        } else {perror("read() failed");}
-        close(client_fd);
-        return;
-    } if (valread == 0) {
-        std::cout << "Connection closed with client\n";
-        close(client_fd);
-        return;
-    }
-    
-    // parse request
-    std::istringstream stream(request);
-    std::string line;
-    Request rq = parse_request(stream, line);
-
-    // parse headers into map
-    std::unordered_map<std::string, std::string> headers;
-    parse_headers(headers, stream, line);
-
-    std::cout << "Method: " << rq.method << "\n";
-    std::cout << "Path: " << rq.path << "\n";
-    std::cout << "Version: " << rq.version << "\n";
-
-    route_request(client_fd, rq, web_root);
-
+    std::cout << "[CONNECTION CLOSED]\n";
     close(client_fd);
 }
