@@ -20,6 +20,7 @@ std::atomic<bool> keep_running(true);
 void handle_sigint(int) {keep_running = false;}
 
 int start_server(Config& cfg) {
+    signal(SIGPIPE, SIG_IGN); // ignore SIGPIPE
 
     // The sigaction() system call is used to change the action taken by a process on receipt of a specific signal.
     struct sigaction sa; // sigaction is a struct that describes how to handle a signal.
@@ -30,6 +31,7 @@ int start_server(Config& cfg) {
     sa.sa_flags = 0; // Extra options for behavior.
 
     sigaction(SIGINT, &sa, nullptr);
+    sigaction(SIGTERM, &sa, nullptr);
 
     // create a socket
     // int socket(int domain, int type, int protocol);
@@ -99,7 +101,7 @@ int start_server(Config& cfg) {
     }
     std::cout << "\nShutting down server...\n";
     close(server_sfd); // close listening socket
-    std::cout << "Server shut down cleanly.\n";
+    std::cout << "Server shut down cleanly\n";
 
     return 0;
 }
@@ -173,6 +175,6 @@ int main(int argc, char* argv[]) {
         std::cerr << "Server ran into some trouble!\n";
         return 1;
     } 
-    std::cout << "Server ran successfully\n";
+    std::cout << "Server ran successfully.\n";
     return 0;
 }
