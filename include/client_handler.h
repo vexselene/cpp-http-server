@@ -20,5 +20,6 @@ void respond(int client_fd, int status, const std::string& body, bool keep_alive
 std::string load_file(const std::string& path);
 std::string resolve_path(const std::string& p);
 void serve_file(int client_fd, const std::string& web_root, const std::string& path, bool keep_alive);
-void route_request(int client_fd, const Request& rq, const std::string& web_root, bool keep_alive);
+void route_request(int client_fd, const Request& rq, const std::string& web_root, std::string& body, bool keep_alive);
 void send_error(int client_fd, int status, const std::string& web_root, bool keep_alive);
+void handle_post(int client_fd, const std::string& path, std::string& body, bool keep_alive);

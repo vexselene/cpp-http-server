@@ -153,9 +153,14 @@ void serve_file(int client_fd, const std::string& web_root, const std::string& p
 }
 
 // route request 
-void route_request(int client_fd, const Request& rq, const std::string& web_root, bool keep_alive) {
+void route_request(int client_fd, const Request& rq, const std::string& web_root, std::string& body, bool keep_alive) {
     if (rq.method.empty() || rq.path.empty() || rq.version.empty()) {
         send_error(client_fd, 400, web_root, keep_alive);
+        return;
+    }
+
+    if (rq.method == "POST") {
+        handle_post(client_fd, rq.path, body, keep_alive);
         return;
     }
 
@@ -177,14 +182,24 @@ void route_request(int client_fd, const Request& rq, const std::string& web_root
     serve_file(client_fd, web_root, rq.path, keep_alive);
 }
 
+void handle_post(int client_fd, const std::string& path, std::string& body, bool keep_alive) {
+    if(path == "/api/search") {
+        //parse body, do search, return JSON
+        std::string response = "{\"results\": []}"; // placeholder
+        respond(client_fd, 200, response, keep_alive, "application/json");
+        return;
+    }
+    respond(client_fd, 404, "{\"error\": \"not found\"}", keep_alive, "application/json");
+}
+
 void handle_client(int client_fd, const std::string& web_root) {
     std::cout << "[NEW CONNECTION]\n";
     bool connection_alive = true;
     int handled = 0;
     const int MAX_REQ = 100;
+    std::string buffer;
 
     while (handled < MAX_REQ && connection_alive) {
-        std::string buffer;
         while(buffer.find("\r\n\r\n") == std::string::npos) {
             char temp_buffer[BUFFER_SIZE];
             ssize_t valread = -1;
@@ -230,10 +245,46 @@ void handle_client(int client_fd, const std::string& web_root) {
         
         std::unordered_map<std::string, std::string> headers;
         parse_headers(headers, stream, line);
+        
+        // recieve body
+        std::string body;
+        auto cl = headers.find("content-length");
+        if(cl != headers.end()) {
+            size_t content_length = 0;
+
+            try {
+                content_length = std::stoi(cl->second);
+            } catch (...) {
+                connection_alive = false;
+                break;
+            }
+
+            if (content_length > 1024 * 1024) { // 1MB limit
+                std::cout << "Content-length > 1MB\n";
+                connection_alive = false;
+                break;
+            }
+            body.resize(content_length);
+            
+            // recv exactly content_length bytes
+            size_t total = 0;
+            
+            // consume from buffer first (if buffer has left over data)
+            if (!buffer.empty()) {
+                size_t copy = std::min(buffer.size(), content_length);
+                std::memcpy(body.data(), buffer.data(), copy);
+                buffer.erase(0, copy);
+                total += copy;
+            }
+
+            while(total < content_length) {
+                ssize_t received = recv(client_fd, body.data() + total, content_length - total, 0); // body.data()  ≈  char* -> gives the pointer to the underlying char buffer
+                if(received <= 0) {connection_alive = false;  break;}
+                total += received;
+            } 
+        }
 
         bool keep_alive = true;
-
-        std::cout << "[CONN] keep_alive=" << (keep_alive ? "true" : "false") << "\n";
 
         auto it = headers.find("connection");
         if (it != headers.end()) {
@@ -243,8 +294,10 @@ void handle_client(int client_fd, const std::string& web_root) {
         } else {
             keep_alive = (rq.version == "HTTP/1.1");
         }
-
-        route_request(client_fd, rq, web_root, keep_alive);
+        
+        std::cout << "[CONN] keep_alive=" << (keep_alive ? "true" : "false") << "\n";
+        
+        route_request(client_fd, rq, web_root, body, keep_alive);
 
         handled++;
 
