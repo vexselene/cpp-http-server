@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <fstream>
 #include <algorithm>
+#include <sys/un.h>  // Unix domain sockets
 
 constexpr int BUFFER_SIZE = 1024;
 
@@ -183,12 +184,44 @@ void route_request(int client_fd, const Request& rq, const std::string& web_root
 }
 
 void handle_post(int client_fd, const std::string& path, std::string& body, bool keep_alive) {
-    if(path == "/api/search") {
-        //parse body, do search, return JSON
-        std::string response = "{\"results\": []}"; // placeholder
-        respond(client_fd, 200, response, keep_alive, "application/json");
+    if (path == "/api/search") {
+        // Connect to Indexer daemon
+        int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (sock < 0) {
+            respond(client_fd, 500, "{\"error\": \"daemon unreachable\"}", keep_alive, "application/json");
+            return;
+        }
+        
+        struct sockaddr_un addr;
+        addr.sun_family = AF_UNIX;
+        strcpy(addr.sun_path, "/tmp/indexer.sock");
+        
+        if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+            close(sock);
+            respond(client_fd, 500, "{\"error\": \"daemon unreachable\"}", keep_alive, "application/json");
+            return;
+        }
+        
+        // Parse the JSON body to extract query
+        // Simple: body is {"query":"math notes"}
+        // For now, just send the raw body
+        send(sock, body.c_str(), body.size(), 0);
+        
+        // Read response
+        char buffer[4096] = {0};
+        int bytes = recv(sock, buffer, sizeof(buffer) - 1, 0);
+        close(sock);
+        
+        if (bytes <= 0) {
+            respond(client_fd, 500, "{\"error\": \"no response\"}", keep_alive, "application/json");
+            return;
+        }
+        
+        std::string json(buffer, bytes);
+        respond(client_fd, 200, json, keep_alive, "application/json");
         return;
     }
+    
     respond(client_fd, 404, "{\"error\": \"not found\"}", keep_alive, "application/json");
 }
 
